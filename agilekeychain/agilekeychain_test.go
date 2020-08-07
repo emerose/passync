@@ -23,6 +23,12 @@ func TestNewAgileKeychain_Errors(t *testing.T) {
 			want:    nil,
 			wantErr: true,
 		},
+		{
+			name:    "Test existent path but not a directory",
+			args:    args{path: "../testdata/agilekeychain/file"},
+			want:    nil,
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

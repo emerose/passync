@@ -13,7 +13,7 @@ type AgileKeychain struct {
 }
 
 // NewAgileKeychain creates a new AgileKeychain object, given a path
-// returns an error if path doesn't exist
+// returns an error if path doesn't exist or is not a directory
 func NewAgileKeychain(keychainPath string) (*AgileKeychain, error) {
 	if !path.IsAbs(keychainPath) {
 		dir, err := os.Getwd()
@@ -29,9 +29,13 @@ func NewAgileKeychain(keychainPath string) (*AgileKeychain, error) {
 		baseDir: keychainPath,
 	}
 
-	_, err := os.Stat(keychainPath)
+	fileinfo, err := os.Stat(keychainPath)
 	if os.IsNotExist(err) {
 		return nil, fmt.Errorf("Non-existent AgileKeychain path %s: %v", keychainPath, err)
+	}
+
+	if !fileinfo.IsDir() {
+		return nil, fmt.Errorf("AgileKeychain path %s not a directory", keychainPath)
 	}
 
 	return ret, nil
