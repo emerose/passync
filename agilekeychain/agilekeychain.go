@@ -29,17 +29,13 @@ type keychainContentsEntry struct {
 	unknown3  string
 }
 
-type rawKeychainContents []rawKeychainEntry
-type rawKeychainEntry []interface{}
-
 // NewAgileKeychain creates a new AgileKeychain object, given a path
 // returns an error if path doesn't exist or is not a directory
 func NewAgileKeychain(keychainPath string) (*AgileKeychain, error) {
 	if !path.IsAbs(keychainPath) {
 		dir, err := os.Getwd()
-
 		if err != nil {
-			return nil, fmt.Errorf("Couldn't get current dir: %v", err)
+			return nil, err
 		}
 
 		keychainPath = path.Join(dir, keychainPath)
@@ -60,7 +56,7 @@ func NewAgileKeychain(keychainPath string) (*AgileKeychain, error) {
 
 	err = ret.loadContents()
 	if err != nil {
-		return nil, fmt.Errorf("Error loading contents: %v", err)
+		return nil, err
 	}
 
 	return ret, nil
@@ -74,6 +70,8 @@ func (k *AgileKeychain) loadContents() error {
 		return err
 	}
 
+	type rawKeychainEntry []interface{}
+	type rawKeychainContents []rawKeychainEntry
 	var rawContents rawKeychainContents
 
 	err = json.NewDecoder(f).Decode(&rawContents)
