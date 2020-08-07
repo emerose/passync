@@ -68,4 +68,8 @@ func TestNewAgileKeychain_Example1(t *testing.T) {
 		t.Errorf("Keychains from absolute and relative paths differ! relative: %v absolute: %v", keychain1, keychain2)
 	}
 
+	length := keychain1.Length()
+	if length != 19 {
+		t.Errorf("Got wrong size: %d", length)
+	}
 }
