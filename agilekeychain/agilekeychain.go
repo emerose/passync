@@ -170,30 +170,39 @@ func (k *AgileKeychain) loadEncryptionKeys(passphrase string) error {
 
 	log.Printf("Found %d keys", len(raw.List))
 
-	for _, key := range raw.List {
+	for _, rawKey := range raw.List {
 		// these strings end in "\u0000" which makes for some invalid base64
-		if strings.HasSuffix(key.Data, "\u0000") {
-			key.Data = key.Data[0 : len(key.Data)-len("\u0000")]
-		}
-		if strings.HasSuffix(key.Validation, "\u0000") {
-			key.Validation = key.Validation[0 : len(key.Validation)-len("\u0000")]
-		}
+		rawKey.Data = stripTrailingNull(rawKey.Data)
+		rawKey.Validation = stripTrailingNull(rawKey.Validation)
 
-		data, err := base64.StdEncoding.DecodeString(key.Data)
+		data, err := base64.StdEncoding.DecodeString(rawKey.Data)
 		if err != nil {
 			return err
 		}
-		validation, err := base64.StdEncoding.DecodeString(key.Validation)
+		validation, err := base64.StdEncoding.DecodeString(rawKey.Validation)
 		if err != nil {
 			return err
 		}
 
-		_, err = decryptKey(data, validation, key.Iterations, passphrase)
+		keyBytes, err := decryptKey(data, rawKey.Iterations, passphrase)
+		err = validateKey(keyBytes, validation)
+		if err != nil {
+			return fmt.Errorf("Failed to validate key %s: %v", rawKey.Identifier, err)
+		}
+		log.Printf("Found and validated key %s", rawKey.Identifier)
 	}
 	return nil
 }
 
-func decryptKey(dataBytes []byte, validationBytes []byte, iterations int, passphrase string) ([]byte, error) {
+func stripTrailingNull(str string) string {
+	if strings.HasSuffix(str, "\u0000") {
+		return str[0 : len(str)-len("\u0000")]
+	} else {
+		return str
+	}
+}
+
+func decryptKey(dataBytes []byte, iterations int, passphrase string) ([]byte, error) {
 	var salt []byte
 
 	// if the data starts with "Salted__", then the first 8 bytes following that are the salt for PBKDF2
@@ -231,28 +240,32 @@ func decryptKey(dataBytes []byte, validationBytes []byte, iterations int, passph
 		return nil, err
 	}
 
-	// now, validate it
+	return key, nil
+}
+
+func validateKey(keyBytes []byte, validationBytes []byte) error {
+	var salt []byte
 
 	// if the data starts with "Salted__", then the first 8 bytes following that are the salt for PBKDF2
 	if bytes.Equal(validationBytes[0:8], []byte(`Salted__`)) {
 		salt = validationBytes[8:16]
 	} else {
 		salt = []byte{0, 0, 0, 0, 0, 0, 0, 0}
-		return nil, fmt.Errorf("unsalted validation data not implemented")
+		return errors.New("unsalted validation data not implemented")
 	}
 
 	encryptedBytes := validationBytes[16:]
 
-	kek, iv = deriveKey(key, salt)
+	kek, iv := deriveKey(keyBytes, salt)
 
-	block, err = aes.NewCipher(kek)
+	block, err := aes.NewCipher(kek)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	decrypter = cipher.NewCBCDecrypter(block, iv)
+	decrypter := cipher.NewCBCDecrypter(block, iv)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	validationResult := make([]byte, len(encryptedBytes))
@@ -260,14 +273,13 @@ func decryptKey(dataBytes []byte, validationBytes []byte, iterations int, passph
 
 	validationResult, err = unpad(validationResult, decrypter.BlockSize())
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	if !bytes.Equal(key, validationResult) {
-		return nil, errors.New("failed to validate key")
+	if !bytes.Equal(keyBytes, validationResult) {
+		return errors.New("failed to validate key")
 	}
-
-	return key, nil
+	return nil
 }
 
 // unpad is needed because this is how openssl pads aes-128-cbc, so we
