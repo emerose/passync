@@ -197,23 +197,15 @@ func (k *AgileKeychain) loadEncryptionKeys(passphrase string) error {
 func stripTrailingNull(str string) string {
 	if strings.HasSuffix(str, "\u0000") {
 		return str[0 : len(str)-len("\u0000")]
-	} else {
-		return str
 	}
+	return str
 }
 
 func decryptKey(dataBytes []byte, iterations int, passphrase string) ([]byte, error) {
-	var salt []byte
-
-	// if the data starts with "Salted__", then the first 8 bytes following that are the salt for PBKDF2
-	if bytes.Equal(dataBytes[0:8], []byte(`Salted__`)) {
-		salt = dataBytes[8:16]
-	} else {
-		salt = []byte{0, 0, 0, 0, 0, 0, 0, 0}
+	salt, blob, err := extractSalt(dataBytes)
+	if err != nil {
+		return nil, err
 	}
-
-	// encrypted key bytes
-	encryptedKey := dataBytes[16:]
 
 	derivedKey := pbkdf2.Key([]byte(passphrase), salt, iterations, 32, sha1.New)
 
@@ -222,69 +214,53 @@ func decryptKey(dataBytes []byte, iterations int, passphrase string) ([]byte, er
 	// and associated IV
 	iv := derivedKey[16:32]
 
-	block, err := aes.NewCipher(kek)
-	if err != nil {
-		return nil, err
-	}
-
-	decrypter := cipher.NewCBCDecrypter(block, iv)
-	if err != nil {
-		return nil, err
-	}
-
-	key := make([]byte, len(encryptedKey))
-	decrypter.CryptBlocks(key, encryptedKey)
-
-	key, err = unpad(key, decrypter.BlockSize())
-	if err != nil {
-		return nil, err
-	}
+	key, err := cbcDecrypt(blob, kek, iv)
 
 	return key, nil
 }
 
 func validateKey(keyBytes []byte, validationBytes []byte) error {
-	var salt []byte
-
-	// if the data starts with "Salted__", then the first 8 bytes following that are the salt for PBKDF2
-	if bytes.Equal(validationBytes[0:8], []byte(`Salted__`)) {
-		salt = validationBytes[8:16]
-	} else {
-		salt = []byte{0, 0, 0, 0, 0, 0, 0, 0}
-		return errors.New("unsalted validation data not implemented")
-	}
-
-	encryptedBytes := validationBytes[16:]
-
-	kek, iv := deriveKey(keyBytes, salt)
-
-	block, err := aes.NewCipher(kek)
+	salt, blob, err := extractSalt(validationBytes)
 	if err != nil {
 		return err
 	}
 
-	decrypter := cipher.NewCBCDecrypter(block, iv)
-	if err != nil {
-		return err
-	}
+	kek, iv := deriveOpensslKey(keyBytes, salt)
 
-	validationResult := make([]byte, len(encryptedBytes))
-	decrypter.CryptBlocks(validationResult, encryptedBytes)
-
-	validationResult, err = unpad(validationResult, decrypter.BlockSize())
+	validationResult, err := cbcDecrypt(blob, kek, iv)
 	if err != nil {
 		return err
 	}
 
 	if !bytes.Equal(keyBytes, validationResult) {
-		return errors.New("failed to validate key")
+		return errors.New("key validation failed")
 	}
 	return nil
 }
 
-// unpad is needed because this is how openssl pads aes-128-cbc, so we
-// need to unpad as well in order to properly decrypt the data. Note
-// that this should conform to PCKS#7.
+func cbcDecrypt(blob []byte, key []byte, iv []byte) (output []byte, err error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
+	decrypter := cipher.NewCBCDecrypter(block, iv)
+	if err != nil {
+		return nil, err
+	}
+
+	ret := make([]byte, len(blob))
+	decrypter.CryptBlocks(ret, blob)
+
+	ret, err = unpad(ret, decrypter.BlockSize())
+	if err != nil {
+		return nil, err
+	}
+
+	return ret, nil
+}
+
+// remove pkcs7 padding
 func unpad(data []byte, blocksize int) ([]byte, error) {
 	if blocksize <= 0 {
 		return nil, errors.New("Invalid block size")
@@ -298,12 +274,15 @@ func unpad(data []byte, blocksize int) ([]byte, error) {
 		return nil, errors.New("Input is not a multiple of blocksize")
 	}
 
+	// in pkcs7, there is always at least one byte of padding, and the character
+	// used to fill it is the length of the padding
 	lastByte := data[len(data)-1]
 	padSize := int(lastByte)
 	if padSize == 0 || padSize > len(data) {
 		return nil, errors.New("Invalid pad size")
 	}
 
+	// check that the padding is actual padding
 	padding := data[len(data)-padSize:]
 	for _, b := range padding {
 		if b != lastByte {
@@ -314,7 +293,22 @@ func unpad(data []byte, blocksize int) ([]byte, error) {
 	return data[:len(data)-padSize], nil
 }
 
-func deriveKey(password []byte, salt []byte) (key []byte, iv []byte) {
+// OpenSSL has a particular way of storing a salt alongside a blob
+func extractSalt(input []byte) (salt []byte, blob []byte, err error) {
+	// if the data starts with "Salted__", then the first 8 bytes following that are the salt
+	if bytes.Equal(input[0:8], []byte(`Salted__`)) {
+		return input[8:16], input[16:], nil
+	} else {
+		// Some code on the Internet returns a salt of all zeros in this case, but I'm not
+		// confident that's the correct behavior.  We throw an error instead; if you're reading
+		// this, you might try uncommenting the following line
+		//		return []byte{0, 0, 0, 0, 0, 0, 0, 0}, input, nil
+		return nil, nil, errors.New("No OpenSSL salt found")
+	}
+}
+
+// OpenSSL also has a particular/odd key derivation function
+func deriveOpensslKey(password []byte, salt []byte) (key []byte, iv []byte) {
 	rounds := 2
 	data := append(password, salt...)
 	md5Hashes := make([][]byte, rounds)
