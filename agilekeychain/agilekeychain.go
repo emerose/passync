@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path"
 	"strings"
@@ -23,6 +22,7 @@ import (
 type AgileKeychain struct {
 	baseDir  string
 	contents keychainContents
+	encKeys  encryptionKeys
 }
 
 // keychainContents is an array of keychainContentsEntrys
@@ -38,6 +38,39 @@ type keychainContentsEntry struct {
 	unknown1  string
 	unknown2  int
 	unknown3  string
+}
+
+type securityLevel int
+
+const (
+	securityLevel3 securityLevel = iota
+	securityLevel5
+)
+
+type encryptionKey struct {
+	id    string
+	key   []byte
+	level securityLevel
+}
+
+type encryptionKeys struct {
+	sl3  encryptionKey
+	sl5  encryptionKey
+	keys map[string]encryptionKey
+}
+
+type rawEncryptionKey struct {
+	Data       string
+	Validation string
+	Level      string
+	Identifier string
+	Iterations int
+}
+
+type rawEncryptionKeys struct {
+	SL3  string
+	SL5  string
+	List []rawEncryptionKey
 }
 
 // NewAgileKeychain creates a new AgileKeychain object, given a path
@@ -141,20 +174,6 @@ func (k *AgileKeychain) loadContents() error {
 }
 
 func (k *AgileKeychain) loadEncryptionKeys(passphrase string) error {
-	type rawEncryptionKey struct {
-		Data       string
-		Validation string
-		Level      string
-		Identifier string
-		Iterations int
-	}
-
-	type rawEncryptionKeys struct {
-		SL3  string
-		SL5  string
-		List []rawEncryptionKey
-	}
-
 	contentsPath := path.Join(k.baseDir, "data", "default", "encryptionKeys.js")
 	f, err := os.Open(contentsPath)
 	if err != nil {
@@ -168,30 +187,62 @@ func (k *AgileKeychain) loadEncryptionKeys(passphrase string) error {
 		return err
 	}
 
-	log.Printf("Found %d keys", len(raw.List))
+	k.encKeys.keys = make(map[string]encryptionKey, len(raw.List))
 
 	for _, rawKey := range raw.List {
-		// these strings end in "\u0000" which makes for some invalid base64
-		rawKey.Data = stripTrailingNull(rawKey.Data)
-		rawKey.Validation = stripTrailingNull(rawKey.Validation)
-
-		data, err := base64.StdEncoding.DecodeString(rawKey.Data)
-		if err != nil {
-			return err
-		}
-		validation, err := base64.StdEncoding.DecodeString(rawKey.Validation)
+		key, err := parseRawEncryptionKey(rawKey, passphrase)
 		if err != nil {
 			return err
 		}
 
-		keyBytes, err := decryptKey(data, rawKey.Iterations, passphrase)
-		err = validateKey(keyBytes, validation)
-		if err != nil {
-			return fmt.Errorf("Failed to validate key %s: %v", rawKey.Identifier, err)
-		}
-		log.Printf("Found and validated key %s", rawKey.Identifier)
+		k.encKeys.keys[key.id] = key
 	}
+
+	var ok bool
+
+	k.encKeys.sl3, ok = k.encKeys.keys[raw.SL3]
+	if !ok {
+		return fmt.Errorf("Couldn't find SL3 key with id %s", raw.SL3)
+	}
+
+	k.encKeys.sl5, ok = k.encKeys.keys[raw.SL5]
+	if !ok {
+		return fmt.Errorf("Couldn't find SL5 key with id %s", raw.SL5)
+	}
+
 	return nil
+}
+
+func parseRawEncryptionKey(raw rawEncryptionKey, passphrase string) (encryptionKey, error) {
+	var ret encryptionKey
+
+	ret.id = raw.Identifier
+	switch raw.Level {
+	case "SL3":
+		ret.level = securityLevel3
+	case "SL5":
+		ret.level = securityLevel5
+	default:
+		return ret, fmt.Errorf("Unknown security level %s", raw.Level)
+	}
+
+	blob, err := base64.StdEncoding.DecodeString(stripTrailingNull(raw.Data))
+	if err != nil {
+		return ret, err
+	}
+
+	validationBytes, err := base64.StdEncoding.DecodeString(stripTrailingNull(raw.Validation))
+	if err != nil {
+		return ret, err
+	}
+
+	ret.key, err = decryptKey(blob, raw.Iterations, passphrase)
+	err = validateKey(ret.key, validationBytes)
+	if err != nil {
+		return ret, fmt.Errorf("Failed to validate key %s: %v", ret.id, err)
+	}
+
+	return ret, nil
 }
 
 func stripTrailingNull(str string) string {
